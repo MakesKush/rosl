@@ -104,6 +104,10 @@ public class MainApp extends Application {
         Button genBtn = new Button("Generate dataset");
         genBtn.setMaxWidth(Double.MAX_VALUE);
 
+        Button delBtn = new Button("Delete selected");
+        delBtn.setMaxWidth(Double.MAX_VALUE);
+        delBtn.setDisable(true);
+
         datasetList.setCellFactory(lv -> new ListCell<>() {
             @Override
             protected void updateItem(DatasetInfo item, boolean empty) {
@@ -119,7 +123,7 @@ public class MainApp extends Application {
             }
         });
 
-        left.getChildren().addAll(leftTitle, form, genBtn, new Separator(), datasetList);
+        left.getChildren().addAll(leftTitle, form, genBtn, delBtn, new Separator(), datasetList);
         VBox.setVgrow(datasetList, Priority.ALWAYS);
 
         // ---------- CENTER ----------
@@ -308,8 +312,71 @@ public class MainApp extends Application {
             bg.submit(task);
         });
 
+        // Delete selected dataset
+        delBtn.setOnAction(e -> {
+            DatasetInfo selected = datasetList.getSelectionModel().getSelectedItem();
+            if (selected == null) return;
+
+            // stop any running loop/session
+            running = false;
+            pauseBtn.setDisable(true);
+            runBtn.setDisable(false);
+            stepBtn.setDisable(false);
+
+            closeSession();
+            currentRunId = null;
+            lastRunParams = null;
+
+            Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
+            confirm.setTitle("Delete dataset");
+            confirm.setHeaderText("Delete dataset #" + selected.id() + "?");
+            confirm.setContentText("This will delete points, runs, metrics and results for this dataset.");
+            var res = confirm.showAndWait();
+            if (res.isEmpty() || res.get() != ButtonType.OK) return;
+
+            delBtn.setDisable(true);
+            status.setText("Deleting dataset id=" + selected.id() + " ...");
+
+            Task<Boolean> t = new Task<>() {
+                @Override
+                protected Boolean call() {
+                    return datasetRepo.deleteDataset(selected.id());
+                }
+            };
+
+            t.setOnSucceeded(ev -> {
+                delBtn.setDisable(false);
+
+                boolean ok = Boolean.TRUE.equals(t.getValue());
+                status.setText(ok ? "Deleted dataset #" + selected.id() : "Dataset not found");
+
+                // refresh list
+                reloadDatasets();
+
+                // clear selection + UI
+                datasetList.getSelectionModel().clearSelection();
+                currentDatasetId = -1;
+                currentPoints = List.of();
+
+                plot.clearClustering();
+                plot.setData(List.of(), xAxis.getValue(), yAxis.getValue());
+                updateDrawLabel(plot, drawLabel);
+            });
+
+            t.setOnFailed(ev -> {
+                delBtn.setDisable(false);
+                Throwable ex = t.getException();
+                showError("Delete failed", ex != null ? ex.getMessage() : "Unknown error");
+                status.setText("Delete failed");
+            });
+
+            bg.submit(t);
+        });
+
         // Dataset selection
         datasetList.getSelectionModel().selectedItemProperty().addListener((obs, old, selected) -> {
+            delBtn.setDisable(selected == null);
+
             running = false;
             pauseBtn.setDisable(true);
             runBtn.setDisable(false);

@@ -35,6 +35,25 @@ public final class DatasetRepository {
             throw new RuntimeException("Failed to list datasets", e);
         }
     }
+    public boolean deleteDataset(long datasetId) {
+        String sql = "DELETE FROM DATASETS WHERE ID = ?";
+
+        try (var c = Database.getConnection()) { // если у тебя метод называется иначе — подставь свой
+            c.setAutoCommit(false);
+            int affected;
+
+            try (var ps = c.prepareStatement(sql)) {
+                ps.setLong(1, datasetId);
+                affected = ps.executeUpdate();
+            }
+
+            c.commit();
+            return affected > 0;
+        } catch (Exception e) {
+            throw new RuntimeException("Failed to delete dataset id=" + datasetId, e);
+        }
+    }
+
 
     public long createDataset(String name, int n, long seed, double noiseSigma, List<PointVector> points) {
         if (points.size() != n) {

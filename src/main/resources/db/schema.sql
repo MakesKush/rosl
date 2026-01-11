@@ -1,105 +1,78 @@
-CREATE TABLE IF NOT EXISTS datasets (
-                                        id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                        name VARCHAR(200) NOT NULL,
-    n INT NOT NULL,
-    d INT NOT NULL,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    seed BIGINT,
-    noise_sigma DOUBLE
+CREATE TABLE IF NOT EXISTS DATASETS (
+                                        ID IDENTITY PRIMARY KEY,
+                                        NAME VARCHAR(255) NOT NULL,
+    N INT NOT NULL,
+    SEED BIGINT NOT NULL,
+    SIGMA DOUBLE NOT NULL,
+    D INT NOT NULL,
+    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
 
--- Фиксированный набор фич:
--- sports, games, music, movies, memes, likes, comments
-CREATE TABLE IF NOT EXISTS points (
-                                      dataset_id BIGINT NOT NULL,
-                                      idx INT NOT NULL,
-
-                                      sports DOUBLE NOT NULL,
-                                      games DOUBLE NOT NULL,
-                                      music DOUBLE NOT NULL,
-                                      movies DOUBLE NOT NULL,
-                                      memes DOUBLE NOT NULL,
-                                      likes DOUBLE NOT NULL,
-                                      comments DOUBLE NOT NULL,
-
-                                      PRIMARY KEY (dataset_id, idx),
-    CONSTRAINT fk_points_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS POINTS (
+                                      ID IDENTITY PRIMARY KEY,
+                                      DATASET_ID BIGINT NOT NULL,
+                                      IDX INT NOT NULL,
+                                      VEC BLOB NOT NULL,
+                                      CONSTRAINT FK_POINTS_DATASETS
+                                      FOREIGN KEY (DATASET_ID) REFERENCES DATASETS(ID) ON DELETE CASCADE
     );
 
-CREATE INDEX IF NOT EXISTS idx_points_dataset ON points(dataset_id);
-
-CREATE TABLE IF NOT EXISTS runs (
-                                    id BIGINT AUTO_INCREMENT PRIMARY KEY,
-                                    dataset_id BIGINT NOT NULL,
-                                    mode VARCHAR(20) NOT NULL,        -- DEMO / BENCHMARK
-    k INT NOT NULL,
-    threads INT NOT NULL,
-    max_iter INT NOT NULL,
-    eps DOUBLE NOT NULL,
-    started_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    ended_at TIMESTAMP,
-    stop_reason VARCHAR(50),
-    CONSTRAINT fk_runs_dataset FOREIGN KEY (dataset_id) REFERENCES datasets(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS RUNS (
+                                    ID IDENTITY PRIMARY KEY,
+                                    DATASET_ID BIGINT NOT NULL,
+                                    MODE VARCHAR(32) NOT NULL,
+    K INT NOT NULL,
+    THREADS INT NOT NULL,
+    MAX_ITER INT NOT NULL,
+    EPS DOUBLE NOT NULL,
+    STATUS VARCHAR(32) NOT NULL DEFAULT 'RUNNING',
+    STOP_REASON VARCHAR(128),
+    CREATED_AT TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    FINISHED_AT TIMESTAMP,
+    CONSTRAINT FK_RUNS_DATASETS
+    FOREIGN KEY (DATASET_ID) REFERENCES DATASETS(ID) ON DELETE CASCADE
     );
 
-CREATE TABLE IF NOT EXISTS assignments (
-                                           run_id BIGINT NOT NULL,
-                                           point_idx INT NOT NULL,
-                                           cluster_id INT NOT NULL,
-                                           PRIMARY KEY (run_id, point_idx),
-    CONSTRAINT fk_assign_run FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS ITER_METRICS (
+                                            ID IDENTITY PRIMARY KEY,
+                                            RUN_ID BIGINT NOT NULL,
+                                            ITER INT NOT NULL,
+                                            SSE DOUBLE NOT NULL,
+                                            ASSIGN_MS DOUBLE NOT NULL,
+                                            UPDATE_MS DOUBLE NOT NULL,
+                                            TOTAL_MS DOUBLE NOT NULL,
+                                            CONSTRAINT FK_ITER_METRICS_RUNS
+                                            FOREIGN KEY (RUN_ID) REFERENCES RUNS(ID) ON DELETE CASCADE
     );
 
-CREATE TABLE IF NOT EXISTS centroids (
-                                         run_id BIGINT NOT NULL,
-                                         cluster_id INT NOT NULL,
-
-                                         sports DOUBLE NOT NULL,
-                                         games DOUBLE NOT NULL,
-                                         music DOUBLE NOT NULL,
-                                         movies DOUBLE NOT NULL,
-                                         memes DOUBLE NOT NULL,
-                                         likes DOUBLE NOT NULL,
-                                         comments DOUBLE NOT NULL,
-
-                                         PRIMARY KEY (run_id, cluster_id),
-    CONSTRAINT fk_centroids_run FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS RUN_METRICS (
+                                           RUN_ID BIGINT PRIMARY KEY,
+                                           TOTAL_MS BIGINT NOT NULL,
+                                           ITERS INT NOT NULL,
+                                           FINAL_SSE DOUBLE NOT NULL,
+                                           AVG_ITER_MS DOUBLE NOT NULL,
+                                           AVG_ASSIGN_MS DOUBLE NOT NULL,
+                                           AVG_UPDATE_MS DOUBLE NOT NULL,
+                                           CONSTRAINT FK_RUN_METRICS_RUNS
+                                           FOREIGN KEY (RUN_ID) REFERENCES RUNS(ID) ON DELETE CASCADE
     );
 
-CREATE TABLE IF NOT EXISTS run_metrics (
-                                           run_id BIGINT PRIMARY KEY,
-                                           total_ms BIGINT,
-                                           iterations INT,
-                                           final_sse DOUBLE,
-                                           avg_iter_ms DOUBLE,
-                                           avg_assign_ms DOUBLE,
-                                           avg_update_ms DOUBLE,
-                                           CONSTRAINT fk_rm_run FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS RESULTS (
+                                       RUN_ID BIGINT PRIMARY KEY,
+                                       CENTROIDS BLOB NOT NULL,
+                                       ASSIGNMENTS BLOB NOT NULL,
+                                       CONSTRAINT FK_RESULTS_RUNS
+                                       FOREIGN KEY (RUN_ID) REFERENCES RUNS(ID) ON DELETE CASCADE
     );
 
-CREATE TABLE IF NOT EXISTS cluster_metrics (
-                                               run_id BIGINT NOT NULL,
-                                               cluster_id INT NOT NULL,
-                                               size INT,
-                                               cluster_sse DOUBLE,
-                                               avg_dist DOUBLE,
-                                               max_dist DOUBLE,
-                                               PRIMARY KEY (run_id, cluster_id),
-    CONSTRAINT fk_cm_run FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
+CREATE TABLE IF NOT EXISTS CLUSTER_METRICS (
+                                               ID IDENTITY PRIMARY KEY,
+                                               RUN_ID BIGINT NOT NULL,
+                                               CLUSTER_ID INT NOT NULL,
+                                               SIZE INT NOT NULL,
+                                               SSE DOUBLE NOT NULL,
+                                               AVG_DIST DOUBLE NOT NULL,
+                                               MAX_DIST DOUBLE NOT NULL,
+                                               CONSTRAINT FK_CLUSTER_METRICS_RUNS
+                                               FOREIGN KEY (RUN_ID) REFERENCES RUNS(ID) ON DELETE CASCADE
     );
-
-CREATE TABLE IF NOT EXISTS iter_metrics (
-                                            run_id BIGINT NOT NULL,
-                                            iter INT NOT NULL,
-                                            sse DOUBLE,
-                                            assign_ms DOUBLE,
-                                            update_ms DOUBLE,
-                                            total_ms DOUBLE,
-                                            PRIMARY KEY (run_id, iter),
-    CONSTRAINT fk_im_run FOREIGN KEY (run_id) REFERENCES runs(id) ON DELETE CASCADE
-    );
-
-CREATE INDEX IF NOT EXISTS idx_runs_dataset ON runs(dataset_id);
-CREATE INDEX IF NOT EXISTS idx_assignments_run ON assignments(run_id);
-CREATE INDEX IF NOT EXISTS idx_centroids_run ON centroids(run_id);
-CREATE INDEX IF NOT EXISTS idx_iter_metrics_run ON iter_metrics(run_id);
