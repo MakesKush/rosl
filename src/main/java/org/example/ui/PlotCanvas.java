@@ -2,44 +2,75 @@ package org.example.ui;
 
 import javafx.scene.canvas.Canvas;
 import javafx.scene.canvas.GraphicsContext;
+import javafx.scene.layout.StackPane;
 import javafx.scene.paint.Color;
+import javafx.scene.text.Font;
 import org.example.model.Feature;
 import org.example.model.PointVector;
 
 import java.util.List;
+import java.util.Random;
 
-public final class PlotCanvas extends Canvas {
+public final class PlotCanvas extends StackPane {
 
-    private List<PointVector> points = List.of();
-    private int xFeature = 0;
-    private int yFeature = 1;
+    private final Canvas canvas = new Canvas();
+    private final GraphicsContext gc = canvas.getGraphicsContext2D();
+
+    private List<PointVector> allPoints = List.of();
 
     private int[] assignment = null;
     private double[][] centroids = null;
 
-    private static final Color[] PALETTE = new Color[] {
-            Color.web("#1f77b4"),
-            Color.web("#ff7f0e"),
-            Color.web("#2ca02c"),
-            Color.web("#d62728"),
-            Color.web("#9467bd"),
-            Color.web("#8c564b"),
-            Color.web("#e377c2"),
-            Color.web("#7f7f7f"),
-            Color.web("#bcbd22"),
-            Color.web("#17becf")
-    };
+    private Feature xFeat = null;
+    private Feature yFeat = null;
 
-    public PlotCanvas(double w, double h) {
-        super(w, h);
-        widthProperty().addListener((obs, o, n) -> redraw());
-        heightProperty().addListener((obs, o, n) -> redraw());
+    // sampling
+    private int sampleLimit = 0;          // 0 => draw all
+    private long sampleSeed = 12345L;
+    private int[] drawIdx = new int[0];
+
+    // scale cache
+    private double minX = 0, maxX = 1, minY = 0, maxY = 1;
+    private boolean hasScale = false;
+
+    public PlotCanvas(double prefW, double prefH) {
+        getChildren().add(canvas);
+        setPrefSize(prefW, prefH);
+
+        // Canvas should follow pane size
+        canvas.widthProperty().bind(widthProperty());
+        canvas.heightProperty().bind(heightProperty());
+
+        widthProperty().addListener((o, a, b) -> redraw());
+        heightProperty().addListener((o, a, b) -> redraw());
+
+        redraw();
     }
 
+    /** 0 => draw all points, else draw random stable subset */
+    public void setSampleLimit(int limit) {
+        this.sampleLimit = Math.max(0, limit);
+        recomputeDrawIdx();
+        redraw();
+    }
+
+    public void setSampleSeed(long seed) {
+        this.sampleSeed = seed;
+        recomputeDrawIdx();
+        redraw();
+    }
+
+    public int getSampleLimit() { return sampleLimit; }
+    public int getDrawCount() { return drawIdx.length; }
+    public int getTotalCount() { return allPoints.size(); }
+
     public void setData(List<PointVector> points, Feature x, Feature y) {
-        this.points = points != null ? points : List.of();
-        this.xFeature = x.ordinal();
-        this.yFeature = y.ordinal();
+        this.allPoints = (points == null) ? List.of() : points;
+        this.xFeat = x;
+        this.yFeat = y;
+
+        recomputeScale();   // O(N) once per dataset/axis change
+        recomputeDrawIdx(); // depends on N and limit
         redraw();
     }
 
@@ -55,66 +86,157 @@ public final class PlotCanvas extends Canvas {
         redraw();
     }
 
-    public void redraw() {
-        double w = getWidth();
-        double h = getHeight();
-        GraphicsContext g = getGraphicsContext2D();
-
-        g.setFill(Color.WHITE);
-        g.fillRect(0, 0, w, h);
-
-        g.setStroke(Color.LIGHTGRAY);
-        g.strokeRect(0.5, 0.5, w - 1, h - 1);
-
-        if (points.isEmpty()) {
-            g.setFill(Color.GRAY);
-            g.fillText("No data selected", 20, 30);
+    private void recomputeDrawIdx() {
+        int n = allPoints.size();
+        if (n == 0) {
+            drawIdx = new int[0];
             return;
         }
 
-        double pad = 25;
-        double ww = Math.max(1, w - 2 * pad);
-        double hh = Math.max(1, h - 2 * pad);
+        if (sampleLimit <= 0 || n <= sampleLimit) {
+            drawIdx = new int[n];
+            for (int i = 0; i < n; i++) drawIdx[i] = i;
+            return;
+        }
 
-        g.setFill(Color.BLACK);
-        g.fillText("X: " + Feature.values()[xFeature].column, 10, h - 10);
-        g.fillText("Y: " + Feature.values()[yFeature].column, 10, 20);
+        int m = sampleLimit;
+        int[] idx = new int[n];
+        for (int i = 0; i < n; i++) idx[i] = i;
+
+        Random r = new Random(sampleSeed ^ n);
+        // Fisher–Yates shuffle
+        for (int i = n - 1; i > 0; i--) {
+            int j = r.nextInt(i + 1);
+            int tmp = idx[i];
+            idx[i] = idx[j];
+            idx[j] = tmp;
+        }
+
+        drawIdx = new int[m];
+        System.arraycopy(idx, 0, drawIdx, 0, m);
+    }
+
+    private void recomputeScale() {
+        if (allPoints.isEmpty() || xFeat == null || yFeat == null) {
+            hasScale = false;
+            return;
+        }
+
+        int xi = featIndex(xFeat);
+        int yi = featIndex(yFeat);
+
+        double loX = Double.POSITIVE_INFINITY, hiX = Double.NEGATIVE_INFINITY;
+        double loY = Double.POSITIVE_INFINITY, hiY = Double.NEGATIVE_INFINITY;
+
+        for (PointVector p : allPoints) {
+            double[] v = p.x();
+            if (xi >= v.length || yi >= v.length) continue;
+
+            double x = v[xi];
+            double y = v[yi];
+
+            if (x < loX) loX = x;
+            if (x > hiX) hiX = x;
+            if (y < loY) loY = y;
+            if (y > hiY) hiY = y;
+        }
+
+        if (!Double.isFinite(loX) || !Double.isFinite(loY) || loX == hiX || loY == hiY) {
+            hasScale = false;
+            return;
+        }
+
+        minX = loX; maxX = hiX;
+        minY = loY; maxY = hiY;
+        hasScale = true;
+    }
+
+    private void redraw() {
+        double w = canvas.getWidth();
+        double h = canvas.getHeight();
+
+        gc.clearRect(0, 0, w, h);
+
+        // background
+        gc.setFill(Color.WHITE);
+        gc.fillRect(0, 0, w, h);
+
+        if (allPoints.isEmpty() || xFeat == null || yFeat == null || !hasScale) {
+            gc.setFill(Color.GRAY);
+            gc.setFont(Font.font(14));
+            gc.fillText("Plot area", w * 0.5 - 30, h * 0.5);
+            return;
+        }
+
+        // frame
+        double pad = 35;
+        double left = pad, top = pad, right = w - pad, bottom = h - pad;
+
+        gc.setStroke(Color.LIGHTGRAY);
+        gc.strokeRect(left, top, right - left, bottom - top);
+
+        // axis labels
+        gc.setFill(Color.GRAY);
+        gc.setFont(Font.font(12));
+        gc.fillText("X: " + xFeat.name().toLowerCase(), left + 5, bottom - 5);
+        gc.fillText("Y: " + yFeat.name().toLowerCase(), left + 5, top + 12);
+
+        int xi = featIndex(xFeat);
+        int yi = featIndex(yFeat);
 
         // points
-        double r = 2.2;
-        for (int i = 0; i < points.size(); i++) {
-            double[] v = points.get(i).x();
-            double xv = v[xFeature];
-            double yv = v[yFeature];
+        for (int t = 0; t < drawIdx.length; t++) {
+            int i = drawIdx[t];
+            PointVector p = allPoints.get(i);
+            double[] v = p.x();
+            if (xi >= v.length || yi >= v.length) continue;
 
-            double px = pad + xv * ww;
-            double py = pad + (1.0 - yv) * hh;
+            double px = map(v[xi], minX, maxX, left, right);
+            double py = map(v[yi], minY, maxY, bottom, top); // invert Y
 
-            Color c = Color.rgb(60, 90, 200, 0.85);
-            if (assignment != null && assignment.length == points.size() && assignment[i] >= 0) {
-                c = PALETTE[assignment[i] % PALETTE.length];
-            }
-            g.setFill(c);
-            g.fillOval(px - r, py - r, 2 * r, 2 * r);
+            int cl = -1;
+            if (assignment != null && i < assignment.length) cl = assignment[i];
+
+            gc.setFill(colorForCluster(cl));
+            gc.fillOval(px - 2, py - 2, 4, 4);
         }
 
         // centroids
         if (centroids != null) {
+            gc.setLineWidth(2.0);
             for (int k = 0; k < centroids.length; k++) {
                 double[] c = centroids[k];
-                double cx = c[xFeature];
-                double cy = c[yFeature];
+                if (xi >= c.length || yi >= c.length) continue;
 
-                double px = pad + cx * ww;
-                double py = pad + (1.0 - cy) * hh;
+                double cx = map(c[xi], minX, maxX, left, right);
+                double cy = map(c[yi], minY, maxY, bottom, top);
 
-                Color col = PALETTE[k % PALETTE.length];
-                g.setFill(col);
-                g.fillOval(px - 6, py - 6, 12, 12);
+                gc.setFill(colorForCluster(k));
+                gc.fillOval(cx - 6, cy - 6, 12, 12);
 
-                g.setStroke(Color.BLACK);
-                g.strokeOval(px - 6, py - 6, 12, 12);
+                gc.setStroke(Color.BLACK);
+                gc.strokeOval(cx - 6, cy - 6, 12, 12);
             }
         }
+    }
+
+    private static double map(double v, double a, double b, double lo, double hi) {
+        double t = (v - a) / (b - a);
+        if (t < 0) t = 0;
+        if (t > 1) t = 1;
+        return lo + t * (hi - lo);
+    }
+
+    // ВАЖНО: тут я использую ordinal() как индекс фичи.
+    // Если у тебя Feature хранит явный индекс (например getIdx()), замени на него.
+    private static int featIndex(Feature f) {
+        return f.ordinal();
+    }
+
+    private static Color colorForCluster(int cl) {
+        if (cl < 0) return Color.rgb(60, 60, 60, 0.75);
+        // HSB palette
+        double hue = (cl * 47) % 360;
+        return Color.hsb(hue, 0.85, 0.85);
     }
 }

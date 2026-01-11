@@ -34,6 +34,7 @@ import java.util.concurrent.Executors;
 public class MainApp extends Application {
 
     private static final long UI_THROTTLE_NS = 400_000_000L; // 400ms
+    private static final int BENCH_SAMPLE_LIMIT = 30_000;
 
     private final DatasetRepository datasetRepo = new DatasetRepository();
     private final RunRepository runRepo = new RunRepository();
@@ -164,6 +165,7 @@ public class MainApp extends Application {
         Label iterLabel = new Label("iter: -");
         Label sseLabel = new Label("sse: -");
         Label timeLabel = new Label("iter ms: -");
+        Label drawLabel = new Label("draw: -");
 
         // Charts
         NumberAxis x1 = new NumberAxis();
@@ -208,7 +210,7 @@ public class MainApp extends Application {
                 new Separator(),
                 stepBtn, runBtn, pauseBtn, resetBtn,
                 new Separator(),
-                iterLabel, sseLabel, timeLabel,
+                iterLabel, sseLabel, timeLabel, drawLabel,
                 new Separator(),
                 new Label("Progress"),
                 sseChart,
@@ -224,13 +226,25 @@ public class MainApp extends Application {
         root.setRight(right);
         root.setBottom(bottom);
 
+        // ---------- Sampling mode wiring ----------
+        applySampleMode(plot, modeBox.getValue());
+        updateDrawLabel(plot, drawLabel);
+
+        modeBox.valueProperty().addListener((obs, old, mode) -> {
+            applySampleMode(plot, mode);
+            updateDrawLabel(plot, drawLabel);
+        });
+
         // ---------- Actions ----------
-        xAxis.valueProperty().addListener((obs, o, n) ->
-                plot.setData(currentPoints, xAxis.getValue(), yAxis.getValue())
-        );
-        yAxis.valueProperty().addListener((obs, o, n) ->
-                plot.setData(currentPoints, xAxis.getValue(), yAxis.getValue())
-        );
+        xAxis.valueProperty().addListener((obs, o, n) -> {
+            plot.setData(currentPoints, xAxis.getValue(), yAxis.getValue());
+            updateDrawLabel(plot, drawLabel);
+        });
+
+        yAxis.valueProperty().addListener((obs, o, n) -> {
+            plot.setData(currentPoints, xAxis.getValue(), yAxis.getValue());
+            updateDrawLabel(plot, drawLabel);
+        });
 
         // Generate dataset
         genBtn.setOnAction(e -> {
@@ -288,7 +302,7 @@ public class MainApp extends Application {
 
         // Dataset selection
         datasetList.getSelectionModel().selectedItemProperty().addListener((obs, old, selected) -> {
-            // если что-то крутилось — стопаем
+            // stop any running loop
             running = false;
             pauseBtn.setDisable(true);
             runBtn.setDisable(false);
@@ -301,6 +315,7 @@ public class MainApp extends Application {
             sseSeries.getData().clear();
             timeSeries.getData().clear();
             plot.clearClustering();
+
             iterLabel.setText("iter: -");
             sseLabel.setText("sse: -");
             timeLabel.setText("iter ms: -");
@@ -309,6 +324,7 @@ public class MainApp extends Application {
                 currentDatasetId = -1;
                 currentPoints = List.of();
                 plot.setData(currentPoints, xAxis.getValue(), yAxis.getValue());
+                updateDrawLabel(plot, drawLabel);
                 return;
             }
 
@@ -324,7 +340,14 @@ public class MainApp extends Application {
             loadTask.setOnSucceeded(ev -> {
                 currentPoints = loadTask.getValue();
                 currentDatasetId = selected.id();
+
+                // stable sample per dataset
+                plot.setSampleSeed(selected.id());
+                applySampleMode(plot, modeBox.getValue());
+
                 plot.setData(currentPoints, xAxis.getValue(), yAxis.getValue());
+                updateDrawLabel(plot, drawLabel);
+
                 status.setText("Loaded " + currentPoints.size() + " points (dataset id=" + selected.id() + ")");
             });
 
@@ -353,6 +376,8 @@ public class MainApp extends Application {
             iterLabel.setText("iter: -");
             sseLabel.setText("sse: -");
             timeLabel.setText("iter ms: -");
+
+            updateDrawLabel(plot, drawLabel);
             status.setText("Reset");
 
             runBtn.setDisable(false);
@@ -360,7 +385,7 @@ public class MainApp extends Application {
             pauseBtn.setDisable(true);
         });
 
-        // Pause (не закрываем session — можно продолжить)
+        // Pause (do not close session — allow continue)
         pauseBtn.setOnAction(e -> {
             running = false;
             pauseBtn.setDisable(true);
@@ -546,11 +571,26 @@ public class MainApp extends Application {
             datasetList.getSelectionModel().select(0);
         } else {
             plot.setData(List.of(), xAxis.getValue(), yAxis.getValue());
+            updateDrawLabel(plot, drawLabel);
         }
 
         stage.setTitle("ROSL");
         stage.setScene(new Scene(root, 1100, 750));
         stage.show();
+    }
+
+    private void applySampleMode(PlotCanvas plot, RunMode mode) {
+        if (mode == RunMode.BENCHMARK) plot.setSampleLimit(BENCH_SAMPLE_LIMIT);
+        else plot.setSampleLimit(0);
+    }
+
+    private void updateDrawLabel(PlotCanvas plot, Label drawLabel) {
+        int total = plot.getTotalCount();
+        if (total <= 0) {
+            drawLabel.setText("draw: -");
+        } else {
+            drawLabel.setText("draw: " + plot.getDrawCount() + "/" + total);
+        }
     }
 
     private RunParams parseRunParams(ComboBox<RunMode> modeBox,
@@ -583,7 +623,6 @@ public class MainApp extends Application {
         sseSeries.getData().clear();
         timeSeries.getData().clear();
 
-        // создаём session + запись run
         session = new KMeansSession(currentPoints, p.k(), p.maxIter(), p.eps(), 12345L, p.threads());
         currentRunId = runRepo.createRun(currentDatasetId, p.mode(), p.k(), p.threads(), p.maxIter(), p.eps());
 
@@ -591,15 +630,12 @@ public class MainApp extends Application {
     }
 
     private void finalizeRun(long runId, IterationSnapshot last) {
-        // results
         resultRepo.saveCentroids(runId, last.centroids());
         resultRepo.saveAssignments(runId, last.assignment());
 
-        // cluster_metrics
         var cm = ClusterMetricsCalc.compute(currentPoints, last.assignment(), last.centroids());
         metricsRepo.saveClusterMetrics(runId, cm.size(), cm.clusterSse(), cm.avgDist(), cm.maxDist());
 
-        // run_metrics
         long totalMs = runStartNano == 0L ? 0L : Math.round((System.nanoTime() - runStartNano) / 1_000_000.0);
         double avgIter = iterCount == 0 ? 0.0 : (sumIterMs / iterCount);
         double avgAssign = iterCount == 0 ? 0.0 : (sumAssignMs / iterCount);
@@ -616,7 +652,6 @@ public class MainApp extends Application {
         );
 
         runRepo.finishRun(runId, last.stopReason() != null ? last.stopReason() : "FINISHED");
-
         resetRunStats();
     }
 
