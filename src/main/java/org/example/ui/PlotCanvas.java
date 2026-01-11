@@ -47,7 +47,6 @@ public final class PlotCanvas extends StackPane {
         redraw();
     }
 
-    /** 0 => draw all points, else draw random stable subset */
     public void setSampleLimit(int limit) {
         this.sampleLimit = Math.max(0, limit);
         recomputeDrawIdx();
@@ -69,8 +68,8 @@ public final class PlotCanvas extends StackPane {
         this.xFeat = x;
         this.yFeat = y;
 
-        recomputeScale();   // O(N) once per dataset/axis change
-        recomputeDrawIdx(); // depends on N and limit
+        recomputeScale();
+        recomputeDrawIdx();
         redraw();
     }
 
@@ -227,15 +226,12 @@ public final class PlotCanvas extends StackPane {
         return lo + t * (hi - lo);
     }
 
-    // ВАЖНО: тут я использую ordinal() как индекс фичи.
-    // Если у тебя Feature хранит явный индекс (например getIdx()), замени на него.
     private static int featIndex(Feature f) {
         return f.ordinal();
     }
 
     private static Color colorForCluster(int cl) {
         if (cl < 0) return Color.rgb(60, 60, 60, 0.75);
-        // HSB palette
         double hue = (cl * 47) % 360;
         return Color.hsb(hue, 0.85, 0.85);
     }

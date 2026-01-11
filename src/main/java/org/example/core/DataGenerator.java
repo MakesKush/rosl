@@ -10,11 +10,6 @@ import java.util.Random;
 public final class DataGenerator {
     private DataGenerator() {}
 
-    /**
-     * Генерим "соцсеточных" пользователей как векторы длины D.
-     * Делается несколько скрытых центров + гауссов шум.
-     * Значения ограничиваем [0..1].
-     */
     public static List<PointVector> generate(int n, long seed, int trueClusters, double noiseSigma) {
         int d = Feature.count();
         Random rnd = new Random(seed);

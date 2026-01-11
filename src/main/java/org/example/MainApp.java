@@ -26,7 +26,9 @@ import org.example.model.Feature;
 import org.example.model.PointVector;
 import org.example.model.RunMode;
 import org.example.ui.PlotCanvas;
+import org.example.ui.ResultsWindow;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -55,6 +57,10 @@ public class MainApp extends Application {
     private volatile long lastUiUpdateNano = 0L;
     private volatile boolean running = false;
 
+    // UI owner
+    private Stage primaryStage;
+    private volatile RunParams lastRunParams = null;
+
     // background worker
     private final ExecutorService bg = Executors.newSingleThreadExecutor(r -> {
         Thread t = new Thread(r, "bg-worker");
@@ -70,6 +76,8 @@ public class MainApp extends Application {
 
     @Override
     public void start(Stage stage) {
+        this.primaryStage = stage;
+
         Database.init();
 
         BorderPane root = new BorderPane();
@@ -302,7 +310,6 @@ public class MainApp extends Application {
 
         // Dataset selection
         datasetList.getSelectionModel().selectedItemProperty().addListener((obs, old, selected) -> {
-            // stop any running loop
             running = false;
             pauseBtn.setDisable(true);
             runBtn.setDisable(false);
@@ -310,6 +317,7 @@ public class MainApp extends Application {
 
             closeSession();
             currentRunId = null;
+            lastRunParams = null;
 
             resetRunStats();
             sseSeries.getData().clear();
@@ -366,6 +374,7 @@ public class MainApp extends Application {
 
             closeSession();
             currentRunId = null;
+            lastRunParams = null;
 
             plot.clearClustering();
 
@@ -385,7 +394,6 @@ public class MainApp extends Application {
             pauseBtn.setDisable(true);
         });
 
-        // Pause (do not close session — allow continue)
         pauseBtn.setOnAction(e -> {
             running = false;
             pauseBtn.setDisable(true);
@@ -445,6 +453,7 @@ public class MainApp extends Application {
 
                     closeSession();
                     currentRunId = null;
+                    lastRunParams = null;
 
                     runBtn.setDisable(false);
                     stepBtn.setDisable(false);
@@ -459,6 +468,7 @@ public class MainApp extends Application {
 
                 closeSession();
                 currentRunId = null;
+                lastRunParams = null;
             });
 
             bg.submit(t);
@@ -545,6 +555,7 @@ public class MainApp extends Application {
 
                 closeSession();
                 currentRunId = null;
+                lastRunParams = null;
             });
 
             runTask.setOnFailed(ev -> {
@@ -560,6 +571,7 @@ public class MainApp extends Application {
 
                 closeSession();
                 currentRunId = null;
+                lastRunParams = null;
             });
 
             bg.submit(runTask);
@@ -625,17 +637,21 @@ public class MainApp extends Application {
 
         session = new KMeansSession(currentPoints, p.k(), p.maxIter(), p.eps(), 12345L, p.threads());
         currentRunId = runRepo.createRun(currentDatasetId, p.mode(), p.k(), p.threads(), p.maxIter(), p.eps());
+        lastRunParams = p;
 
         status.setText("Run created: id=" + currentRunId);
     }
 
     private void finalizeRun(long runId, IterationSnapshot last) {
+        // results -> DB
         resultRepo.saveCentroids(runId, last.centroids());
         resultRepo.saveAssignments(runId, last.assignment());
 
+        // cluster_metrics -> DB
         var cm = ClusterMetricsCalc.compute(currentPoints, last.assignment(), last.centroids());
         metricsRepo.saveClusterMetrics(runId, cm.size(), cm.clusterSse(), cm.avgDist(), cm.maxDist());
 
+        // run_metrics -> DB
         long totalMs = runStartNano == 0L ? 0L : Math.round((System.nanoTime() - runStartNano) / 1_000_000.0);
         double avgIter = iterCount == 0 ? 0.0 : (sumIterMs / iterCount);
         double avgAssign = iterCount == 0 ? 0.0 : (sumAssignMs / iterCount);
@@ -652,6 +668,46 @@ public class MainApp extends Application {
         );
 
         runRepo.finishRun(runId, last.stopReason() != null ? last.stopReason() : "FINISHED");
+
+        // results window
+        RunParams p = lastRunParams;
+        if (p != null && primaryStage != null) {
+            int[] sz = cm.size();
+            double[] csse = cm.clusterSse();
+            double[] avg = cm.avgDist();
+            double[] mx = cm.maxDist();
+
+            var rows = new ArrayList<ResultsWindow.ClusterRow>(sz.length);
+            int totalN = currentPoints.size();
+            for (int i = 0; i < sz.length; i++) {
+                double share = totalN == 0 ? 0.0 : (100.0 * sz[i] / totalN);
+                rows.add(new ResultsWindow.ClusterRow(i, sz[i], share, csse[i], avg[i], mx[i]));
+            }
+
+            var summary = new ResultsWindow.RunSummary(
+                    runId,
+                    currentDatasetId,
+                    p.mode().name(),
+                    p.k(),
+                    p.threads(),
+                    p.maxIter(),
+                    p.eps(),
+                    last.stopReason(),
+                    totalMs,
+                    last.iter(),
+                    last.sse(),
+                    avgIter,
+                    avgAssign,
+                    avgUpdate
+            );
+
+            if (Platform.isFxApplicationThread()) {
+                ResultsWindow.show(primaryStage, summary, rows);
+            } else {
+                Platform.runLater(() -> ResultsWindow.show(primaryStage, summary, rows));
+            }
+        }
+
         resetRunStats();
     }
 

@@ -9,6 +9,10 @@ import javafx.scene.layout.*;
 import javafx.stage.Modality;
 import javafx.stage.Stage;
 
+import java.io.BufferedWriter;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
 import java.text.DecimalFormat;
 import java.util.List;
 
@@ -66,7 +70,7 @@ public final class ResultsWindow {
         st.initModality(Modality.WINDOW_MODAL);
         st.setTitle("ROSL — Results (run #" + s.runId() + ")");
 
-        // ----- top: run metrics grid -----
+        // ---- run metrics grid
         GridPane grid = new GridPane();
         grid.setHgap(10);
         grid.setVgap(8);
@@ -88,7 +92,7 @@ public final class ResultsWindow {
         TitledPane runPane = new TitledPane("Run metrics", grid);
         runPane.setCollapsible(false);
 
-        // ----- bottom: cluster table -----
+        // ---- cluster table
         TableView<ClusterRow> table = new TableView<>();
         table.setItems(FXCollections.observableArrayList(rows));
         table.setColumnResizePolicy(TableView.CONSTRAINED_RESIZE_POLICY_FLEX_LAST_COLUMN);
@@ -116,17 +120,136 @@ public final class ResultsWindow {
         TitledPane clusterPane = new TitledPane("Cluster metrics", table);
         clusterPane.setCollapsible(false);
 
-        // ----- buttons -----
-        Button close = new Button("Close");
-        close.setOnAction(e -> st.close());
-        HBox buttons = new HBox(10, close);
+        // ---- buttons
+        Button exportBtn = new Button("Export CSV");
+        Button openFolderBtn = new Button("Open folder");
+        Button closeBtn = new Button("Close");
+
+        openFolderBtn.setDisable(true);
+
+        exportBtn.setOnAction(e -> {
+            try {
+                Path dir = exportDir();
+                Files.createDirectories(dir);
+
+                ExportPaths out = exportCsv(dir, s, rows);
+                openFolderBtn.setDisable(false);
+
+                info("Export done",
+                        "Saved:\n" +
+                                out.runMetricsFile.getFileName() + "\n" +
+                                out.clusterMetricsFile.getFileName() + "\n\n" +
+                                "Folder:\n" + dir);
+            } catch (Exception ex) {
+                error("Export failed", ex.getMessage() == null ? ex.toString() : ex.getMessage());
+            }
+        });
+
+        openFolderBtn.setOnAction(e -> {
+            try {
+                Path dir = exportDir();
+                openFolder(dir);
+            } catch (Exception ex) {
+                error("Open folder failed", ex.getMessage() == null ? ex.toString() : ex.getMessage());
+            }
+        });
+
+        closeBtn.setOnAction(e -> st.close());
+
+        HBox buttons = new HBox(10, exportBtn, openFolderBtn, closeBtn);
         buttons.setPadding(new Insets(10, 0, 0, 0));
 
         VBox root = new VBox(10, runPane, clusterPane, buttons);
         root.setPadding(new Insets(12));
 
-        st.setScene(new Scene(root, 720, 520));
+        st.setScene(new Scene(root, 760, 540));
         st.show();
+    }
+
+//экспорт
+
+    private static Path exportDir() {
+        // ~/.local/share/rosl/exports
+        String home = System.getProperty("user.home");
+        return Paths.get(home, ".local", "share", "rosl", "exports");
+    }
+
+    private static final class ExportPaths {
+        final Path runMetricsFile;
+        final Path clusterMetricsFile;
+
+        private ExportPaths(Path runMetricsFile, Path clusterMetricsFile) {
+            this.runMetricsFile = runMetricsFile;
+            this.clusterMetricsFile = clusterMetricsFile;
+        }
+    }
+
+    private static ExportPaths exportCsv(Path dir, RunSummary s, List<ClusterRow> rows) throws IOException {
+        Path runFile = dir.resolve("run_" + s.runId() + "_run_metrics.csv");
+        Path clusterFile = dir.resolve("run_" + s.runId() + "_cluster_metrics.csv");
+
+        // run_metrics.csv (1 row)
+        try (BufferedWriter w = Files.newBufferedWriter(runFile, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+
+            w.write(String.join(",",
+                    "run_id","dataset_id","mode","k","threads","max_iter","eps","stop_reason",
+                    "total_ms","iterations","final_sse",
+                    "avg_iter_ms","avg_assign_ms","avg_update_ms"
+            ));
+            w.newLine();
+
+            w.write(String.join(",",
+                    csv(s.runId()),
+                    csv(s.datasetId()),
+                    csv(s.mode()),
+                    csv(s.k()),
+                    csv(s.threads()),
+                    csv(s.maxIter()),
+                    csv(DF6.format(s.eps())),
+                    csv(s.stopReason() == null ? "" : s.stopReason()),
+                    csv(s.totalMs()),
+                    csv(s.iterations()),
+                    csv(DF6.format(s.finalSse())),
+                    csv(DF2.format(s.avgIterMs())),
+                    csv(DF2.format(s.avgAssignMs())),
+                    csv(DF2.format(s.avgUpdateMs()))
+            ));
+            w.newLine();
+        }
+
+        // cluster_metrics.csv (table)
+        try (BufferedWriter w = Files.newBufferedWriter(clusterFile, StandardCharsets.UTF_8,
+                StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING)) {
+
+            w.write(String.join(",", "cluster","size","share_pct","sse","avgDist","maxDist"));
+            w.newLine();
+
+            for (ClusterRow r : rows) {
+                w.write(String.join(",",
+                        csv(r.getCluster()),
+                        csv(r.getSize()),
+                        csv(DF1.format(r.getSharePct())),
+                        csv(DF6.format(r.getSse())),
+                        csv(DF6.format(r.getAvgDist())),
+                        csv(DF6.format(r.getMaxDist()))
+                ));
+                w.newLine();
+            }
+        }
+
+        return new ExportPaths(runFile, clusterFile);
+    }
+
+    private static String csv(Object v) {
+        String s = String.valueOf(v);
+        boolean needQuotes = s.contains(",") || s.contains("\"") || s.contains("\n") || s.contains("\r");
+        if (!needQuotes) return s;
+        return "\"" + s.replace("\"", "\"\"") + "\"";
+    }
+
+    private static void openFolder(Path dir) throws IOException, InterruptedException {
+        new ProcessBuilder("xdg-open", dir.toAbsolutePath().toString()).start();
     }
 
     private static int addRow(GridPane g, int r, String k, String v) {
@@ -135,6 +258,22 @@ public final class ResultsWindow {
         Label lv = new Label(v);
         g.addRow(r, lk, lv);
         return r + 1;
+    }
+
+    private static void info(String title, String msg) {
+        Alert a = new Alert(Alert.AlertType.INFORMATION);
+        a.setTitle(title);
+        a.setHeaderText(title);
+        a.setContentText(msg);
+        a.showAndWait();
+    }
+
+    private static void error(String title, String msg) {
+        Alert a = new Alert(Alert.AlertType.ERROR);
+        a.setTitle(title);
+        a.setHeaderText(title);
+        a.setContentText(msg);
+        a.showAndWait();
     }
 
     private ResultsWindow() {}
