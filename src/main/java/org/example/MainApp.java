@@ -45,7 +45,7 @@ public class MainApp extends Application {
 
     private volatile KMeansSession session = null;
     private volatile long currentDatasetId = -1;
-    private volatile Long currentRunId = null;
+    private volatile long currentRunId = -1; // no Long/null
 
     // run stats
     private volatile long runStartNano = 0L;
@@ -311,8 +311,13 @@ public class MainApp extends Application {
 
             task.setOnFailed(ev -> {
                 genBtn.setDisable(false);
+
                 Throwable ex = task.getException();
-                showError("Generation failed", ex != null ? ex.getMessage() : "Unknown error");
+                Throwable rootCause = ex;
+                while (rootCause != null && rootCause.getCause() != null) rootCause = rootCause.getCause();
+                if (ex != null) ex.printStackTrace();
+
+                showError("Generation failed", rootCause != null ? rootCause.toString() : "Unknown error");
                 status.setText("Failed");
             });
 
@@ -324,14 +329,13 @@ public class MainApp extends Application {
             DatasetInfo selected = datasetList.getSelectionModel().getSelectedItem();
             if (selected == null) return;
 
-            // stop any running loop/session
             running = false;
             pauseBtn.setDisable(true);
             runBtn.setDisable(false);
             stepBtn.setDisable(false);
 
             closeSession();
-            currentRunId = null;
+            currentRunId = -1;
             lastRunParams = null;
 
             Alert confirm = new Alert(Alert.AlertType.CONFIRMATION);
@@ -357,10 +361,8 @@ public class MainApp extends Application {
                 boolean ok = Boolean.TRUE.equals(t.getValue());
                 status.setText(ok ? "Deleted dataset #" + selected.id() : "Dataset not found");
 
-                // refresh list
                 reloadDatasets();
 
-                // clear selection + UI
                 datasetList.getSelectionModel().clearSelection();
                 currentDatasetId = -1;
                 currentPoints = List.of();
@@ -390,7 +392,7 @@ public class MainApp extends Application {
             stepBtn.setDisable(false);
 
             closeSession();
-            currentRunId = null;
+            currentRunId = -1;
             lastRunParams = null;
 
             resetRunStats();
@@ -423,7 +425,6 @@ public class MainApp extends Application {
                 currentPoints = loadTask.getValue();
                 currentDatasetId = selected.id();
 
-                // stable sample per dataset
                 plot.setSampleSeed(selected.id());
                 applySampleMode(plot, modeBox.getValue());
 
@@ -447,7 +448,7 @@ public class MainApp extends Application {
             running = false;
 
             closeSession();
-            currentRunId = null;
+            currentRunId = -1;
             lastRunParams = null;
 
             plot.clearClustering();
@@ -489,11 +490,23 @@ public class MainApp extends Application {
             if (p == null) return;
 
             if (session == null) {
-                startNewRun(p, sseSeries, timeSeries);
-                plot.clearClustering();
+                try {
+                    startNewRun(p, sseSeries, timeSeries);
+                    plot.clearClustering();
+                } catch (Exception ex) {
+                    showError("Run init failed", ex.getMessage() == null ? ex.toString() : ex.getMessage());
+                    closeSession();
+                    currentRunId = -1;
+                    lastRunParams = null;
+                    return;
+                }
             }
 
             final long runId = currentRunId;
+            if (runId < 0) {
+                showError("Run not created", "currentRunId is invalid");
+                return;
+            }
 
             Task<IterationSnapshot> t = new Task<>() {
                 @Override
@@ -523,10 +536,12 @@ public class MainApp extends Application {
 
                 if (s.stopReason() != null) {
                     status.setText("Finished: " + s.stopReason());
-                    finalizeRun(runId, s);
+
+                    // Step handler runs on FX thread -> safe
+                    finalizeRun(runId, s, lastRunParams, currentDatasetId, currentPoints);
 
                     closeSession();
-                    currentRunId = null;
+                    currentRunId = -1;
                     lastRunParams = null;
 
                     runBtn.setDisable(false);
@@ -541,7 +556,7 @@ public class MainApp extends Application {
                 status.setText("Step failed");
 
                 closeSession();
-                currentRunId = null;
+                currentRunId = -1;
                 lastRunParams = null;
             });
 
@@ -561,12 +576,30 @@ public class MainApp extends Application {
             if (p == null) return;
 
             if (session == null) {
-                startNewRun(p, sseSeries, timeSeries);
-                plot.clearClustering();
+                try {
+                    startNewRun(p, sseSeries, timeSeries);
+                    plot.clearClustering();
+                } catch (Exception ex) {
+                    showError("Run init failed", ex.getMessage() == null ? ex.toString() : ex.getMessage());
+                    closeSession();
+                    currentRunId = -1;
+                    lastRunParams = null;
+                    return;
+                }
             }
 
             final long runId = currentRunId;
+            if (runId < 0) {
+                showError("Run not created", "currentRunId is invalid");
+                return;
+            }
+
             final RunMode runMode = p.mode();
+
+            // ---- SNAPSHOTS (fix ResultsWindow missing in DEMO/Run) ----
+            final RunParams pSnapshot = (lastRunParams != null) ? lastRunParams : p;
+            final long datasetIdSnapshot = currentDatasetId;
+            final List<PointVector> pointsSnapshot = currentPoints;
 
             running = true;
             runBtn.setDisable(true);
@@ -607,8 +640,10 @@ public class MainApp extends Application {
                         }
 
                         if (s.stopReason() != null) {
-                            Platform.runLater(() -> status.setText("Finished: " + s.stopReason()));
-                            Platform.runLater(() -> finalizeRun(runId, s));
+                            Platform.runLater(() -> {
+                                status.setText("Finished: " + s.stopReason());
+                                finalizeRun(runId, s, pSnapshot, datasetIdSnapshot, pointsSnapshot);
+                            });
                             break;
                         }
 
@@ -628,7 +663,7 @@ public class MainApp extends Application {
                 pauseBtn.setDisable(true);
 
                 closeSession();
-                currentRunId = null;
+                currentRunId = -1;
                 lastRunParams = null;
             });
 
@@ -644,7 +679,7 @@ public class MainApp extends Application {
                 status.setText("Run failed");
 
                 closeSession();
-                currentRunId = null;
+                currentRunId = -1;
                 lastRunParams = null;
             });
 
@@ -710,63 +745,99 @@ public class MainApp extends Application {
         timeSeries.getData().clear();
 
         session = new KMeansSession(currentPoints, p.k(), p.maxIter(), p.eps(), 12345L, p.threads());
-        currentRunId = runRepo.createRun(currentDatasetId, p.mode(), p.k(), p.threads(), p.maxIter(), p.eps());
+
+        long rid = runRepo.createRun(currentDatasetId, p.mode(), p.k(), p.threads(), p.maxIter(), p.eps());
+        if (rid <= 0) throw new IllegalStateException("RunRepository.createRun returned invalid id: " + rid);
+
+        currentRunId = rid;
         lastRunParams = p;
 
         status.setText("Run created: id=" + currentRunId);
     }
 
+    // Wrapper (kept for compatibility)
     private void finalizeRun(long runId, IterationSnapshot last) {
-        // results -> DB
-        resultRepo.saveCentroids(runId, last.centroids());
-        resultRepo.saveAssignments(runId, last.assignment());
+        finalizeRun(runId, last, lastRunParams, currentDatasetId, currentPoints);
+    }
 
-        // cluster_metrics -> DB
-        var cm = ClusterMetricsCalc.compute(currentPoints, last.assignment(), last.centroids());
-        metricsRepo.saveClusterMetrics(runId, cm.size(), cm.clusterSse(), cm.avgDist(), cm.maxDist());
+    // Snapshot-based finalize (fix ResultsWindow disappearing)
+    private void finalizeRun(long runId, IterationSnapshot last,
+                             RunParams p, long datasetId, List<PointVector> points) {
 
-        // run_metrics -> DB
-        long totalMs = runStartNano == 0L ? 0L : Math.round((System.nanoTime() - runStartNano) / 1_000_000.0);
-        double avgIter = iterCount == 0 ? 0.0 : (sumIterMs / iterCount);
-        double avgAssign = iterCount == 0 ? 0.0 : (sumAssignMs / iterCount);
-        double avgUpdate = iterCount == 0 ? 0.0 : (sumUpdateMs / iterCount);
+        // 1) Сначала считаем метрики (это чисто в памяти)
+        var cm = ClusterMetricsCalc.compute(points, last.assignment(), last.centroids());
 
-        metricsRepo.insertRunMetrics(
-                runId,
-                totalMs,
-                last.iter(),
-                last.sse(),
-                avgIter,
-                avgAssign,
-                avgUpdate
-        );
+        // 2) Сначала показываем окно (чтобы оно НЕ зависело от БД)
+        try {
+            if (p != null && primaryStage != null) {
+                int[] sz = cm.size();
+                double[] csse = cm.clusterSse();
+                double[] avg = cm.avgDist();
+                double[] mx = cm.maxDist();
 
-        runRepo.finishRun(runId, last.stopReason() != null ? last.stopReason() : "FINISHED");
+                var rows = new ArrayList<ResultsWindow.ClusterRow>(sz.length);
+                int totalN = points.size();
+                for (int i = 0; i < sz.length; i++) {
+                    double share = totalN == 0 ? 0.0 : (100.0 * sz[i] / totalN);
+                    rows.add(new ResultsWindow.ClusterRow(i, sz[i], share, csse[i], avg[i], mx[i]));
+                }
 
-        // results window
-        RunParams p = lastRunParams;
-        if (p != null && primaryStage != null) {
-            int[] sz = cm.size();
-            double[] csse = cm.clusterSse();
-            double[] avg = cm.avgDist();
-            double[] mx = cm.maxDist();
+                long totalMs = runStartNano == 0L ? 0L : Math.round((System.nanoTime() - runStartNano) / 1_000_000.0);
+                double avgIter = iterCount == 0 ? 0.0 : (sumIterMs / iterCount);
+                double avgAssign = iterCount == 0 ? 0.0 : (sumAssignMs / iterCount);
+                double avgUpdate = iterCount == 0 ? 0.0 : (sumUpdateMs / iterCount);
 
-            var rows = new ArrayList<ResultsWindow.ClusterRow>(sz.length);
-            int totalN = currentPoints.size();
-            for (int i = 0; i < sz.length; i++) {
-                double share = totalN == 0 ? 0.0 : (100.0 * sz[i] / totalN);
-                rows.add(new ResultsWindow.ClusterRow(i, sz[i], share, csse[i], avg[i], mx[i]));
+                var summary = new ResultsWindow.RunSummary(
+                        runId,
+                        datasetId,
+                        p.mode().name(),
+                        p.k(),
+                        p.threads(),
+                        p.maxIter(),
+                        p.eps(),
+                        last.stopReason(),
+                        totalMs,
+                        last.iter(),
+                        last.sse(),
+                        avgIter,
+                        avgAssign,
+                        avgUpdate
+                );
+
+                // мы и так обычно на FX потоке, но на всякий:
+                if (Platform.isFxApplicationThread()) {
+                    ResultsWindow.show(primaryStage, summary, rows);
+                } else {
+                    Platform.runLater(() -> ResultsWindow.show(primaryStage, summary, rows));
+                }
             }
+        } catch (Exception ex) {
+            ex.printStackTrace();
+            // окно не смогли показать — не валим всё
+        }
 
-            var summary = new ResultsWindow.RunSummary(
+        // 3) А уже потом — БД (и всё в try/catch, чтобы не убить поток)
+        try {
+            resultRepo.saveCentroids(runId, last.centroids());
+            resultRepo.saveAssignments(runId, last.assignment());
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        try {
+            metricsRepo.saveClusterMetrics(runId, cm.size(), cm.clusterSse(), cm.avgDist(), cm.maxDist());
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
+
+        try {
+            long totalMs = runStartNano == 0L ? 0L : Math.round((System.nanoTime() - runStartNano) / 1_000_000.0);
+            double avgIter = iterCount == 0 ? 0.0 : (sumIterMs / iterCount);
+            double avgAssign = iterCount == 0 ? 0.0 : (sumAssignMs / iterCount);
+            double avgUpdate = iterCount == 0 ? 0.0 : (sumUpdateMs / iterCount);
+
+            metricsRepo.insertRunMetrics(
                     runId,
-                    currentDatasetId,
-                    p.mode().name(),
-                    p.k(),
-                    p.threads(),
-                    p.maxIter(),
-                    p.eps(),
-                    last.stopReason(),
                     totalMs,
                     last.iter(),
                     last.sse(),
@@ -774,16 +845,19 @@ public class MainApp extends Application {
                     avgAssign,
                     avgUpdate
             );
+        } catch (Exception ex) {
+            ex.printStackTrace();
+        }
 
-            if (Platform.isFxApplicationThread()) {
-                ResultsWindow.show(primaryStage, summary, rows);
-            } else {
-                Platform.runLater(() -> ResultsWindow.show(primaryStage, summary, rows));
-            }
+        try {
+            runRepo.finishRun(runId, last.stopReason() != null ? last.stopReason() : "FINISHED");
+        } catch (Exception ex) {
+            ex.printStackTrace();
         }
 
         resetRunStats();
     }
+
 
     private void resetRunStats() {
         runStartNano = 0L;

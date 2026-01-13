@@ -8,8 +8,8 @@ public final class RunRepository {
 
     public long createRun(long datasetId, RunMode mode, int k, int threads, int maxIter, double eps) {
         String sql = """
-            INSERT INTO runs(dataset_id, mode, k, threads, max_iter, eps, started_at)
-            VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            INSERT INTO runs(dataset_id, mode, k, threads, max_iter, eps)
+            VALUES (?, ?, ?, ?, ?, ?)
             """;
 
         try (Connection c = Database.getConnection();
@@ -37,15 +37,19 @@ public final class RunRepository {
     public void finishRun(long runId, String stopReason) {
         String sql = """
             UPDATE runs
-            SET ended_at = CURRENT_TIMESTAMP, stop_reason = ?
+            SET status = 'FINISHED',
+                stop_reason = ?,
+                finished_at = CURRENT_TIMESTAMP
             WHERE id = ?
             """;
 
         try (Connection c = Database.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
+
             ps.setString(1, stopReason);
             ps.setLong(2, runId);
             ps.executeUpdate();
+
         } catch (SQLException e) {
             throw new RuntimeException("Failed to finish run id=" + runId, e);
         }
