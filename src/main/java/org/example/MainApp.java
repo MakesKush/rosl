@@ -131,11 +131,18 @@ public class MainApp extends Application {
 
         ComboBox<Feature> xAxis = new ComboBox<>();
         xAxis.getItems().setAll(Feature.values());
-        xAxis.setValue(Feature.SPORTS);
+        xAxis.setValue(Feature.LIKES_SPORTS);
 
         ComboBox<Feature> yAxis = new ComboBox<>();
         yAxis.getItems().setAll(Feature.values());
-        yAxis.setValue(Feature.GAMES);
+        yAxis.setValue(Feature.LIKES_GAMES);
+
+        javafx.util.StringConverter<Feature> conv = new javafx.util.StringConverter<>() {
+            @Override public String toString(Feature f) { return (f == null) ? "" : f.column; }
+            @Override public Feature fromString(String s) { return null; }
+        };
+        xAxis.setConverter(conv);
+        yAxis.setConverter(conv);
 
         HBox axisBar = new HBox(10, new Label("X:"), xAxis, new Label("Y:"), yAxis);
         axisBar.setPadding(new Insets(8));

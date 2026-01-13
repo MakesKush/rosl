@@ -4,6 +4,7 @@ import org.example.model.DatasetInfo;
 import org.example.model.Feature;
 import org.example.model.PointVector;
 
+import java.io.*;
 import java.sql.*;
 import java.time.LocalDateTime;
 import java.util.ArrayList;
@@ -35,46 +36,45 @@ public final class DatasetRepository {
             throw new RuntimeException("Failed to list datasets", e);
         }
     }
+
     public boolean deleteDataset(long datasetId) {
-        String sql = "DELETE FROM DATASETS WHERE ID = ?";
+        String sql = "DELETE FROM datasets WHERE id = ?";
 
-        try (var c = Database.getConnection()) { // если у тебя метод называется иначе — подставь свой
+        try (Connection c = Database.getConnection()) {
             c.setAutoCommit(false);
-            int affected;
 
-            try (var ps = c.prepareStatement(sql)) {
+            int affected;
+            try (PreparedStatement ps = c.prepareStatement(sql)) {
                 ps.setLong(1, datasetId);
                 affected = ps.executeUpdate();
             }
 
             c.commit();
             return affected > 0;
+
         } catch (Exception e) {
             throw new RuntimeException("Failed to delete dataset id=" + datasetId, e);
         }
     }
 
+    public long createDataset(String name, int n, long seed, double sigma, List<PointVector> points) {
+        if (points.size() != n) throw new IllegalArgumentException("points.size != n");
 
-    public long createDataset(String name, int n, long seed, double noiseSigma, List<PointVector> points) {
-        if (points.size() != n) {
-            throw new IllegalArgumentException("points.size != n");
-        }
+        String insertDataset = "INSERT INTO datasets(name, n, seed, sigma, d) VALUES (?, ?, ?, ?, ?)";
+        String insertPoint   = "INSERT INTO points(dataset_id, idx, vec) VALUES (?, ?, ?)";
 
-        String insertDataset = "INSERT INTO datasets(name, n, d, seed, noise_sigma) VALUES (?, ?, ?, ?, ?)";
-        String insertPoint =
-                "INSERT INTO points(dataset_id, idx, sports, games, music, movies, memes, likes, comments) " +
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)";
-
-        try (Connection c = Database.getConnection()) {
+        Connection c = null;
+        try {
+            c = Database.getConnection();
             c.setAutoCommit(false);
 
             long datasetId;
             try (PreparedStatement ps = c.prepareStatement(insertDataset, Statement.RETURN_GENERATED_KEYS)) {
                 ps.setString(1, name);
                 ps.setInt(2, n);
-                ps.setInt(3, Feature.count());
-                ps.setLong(4, seed);
-                ps.setDouble(5, noiseSigma);
+                ps.setLong(3, seed);
+                ps.setDouble(4, sigma);
+                ps.setInt(5, Feature.count()); // 15
                 ps.executeUpdate();
 
                 try (ResultSet keys = ps.getGeneratedKeys()) {
@@ -92,15 +92,7 @@ public final class DatasetRepository {
 
                     ps.setLong(1, datasetId);
                     ps.setInt(2, p.idx());
-
-                    // порядок должен совпадать со схемой
-                    ps.setDouble(3, x[0]); // sports
-                    ps.setDouble(4, x[1]); // games
-                    ps.setDouble(5, x[2]); // music
-                    ps.setDouble(6, x[3]); // movies
-                    ps.setDouble(7, x[4]); // memes
-                    ps.setDouble(8, x[5]); // likes
-                    ps.setDouble(9, x[6]); // comments
+                    ps.setBytes(3, packVec(x));
 
                     ps.addBatch();
                 }
@@ -110,20 +102,24 @@ public final class DatasetRepository {
             c.commit();
             return datasetId;
 
-        } catch (SQLException e) {
+        } catch (Exception e) {
+            try { if (c != null) c.rollback(); } catch (Exception ignored) {}
             throw new RuntimeException("Failed to create dataset", e);
+        } finally {
+            try { if (c != null) c.close(); } catch (Exception ignored) {}
         }
     }
 
     public List<PointVector> loadPoints(long datasetId) {
         String sql = """
-        SELECT idx, sports, games, music, movies, memes, likes, comments
-        FROM points
-        WHERE dataset_id = ?
-        ORDER BY idx
-        """;
+                SELECT idx, vec
+                FROM points
+                WHERE dataset_id = ?
+                ORDER BY idx
+                """;
 
         List<PointVector> out = new ArrayList<>();
+
         try (Connection c = Database.getConnection();
              PreparedStatement ps = c.prepareStatement(sql)) {
 
@@ -132,24 +128,43 @@ public final class DatasetRepository {
             try (ResultSet rs = ps.executeQuery()) {
                 while (rs.next()) {
                     int idx = rs.getInt("idx");
-                    double[] x = new double[Feature.count()];
+                    byte[] blob = rs.getBytes("vec");
 
-                    x[0] = rs.getDouble("sports");
-                    x[1] = rs.getDouble("games");
-                    x[2] = rs.getDouble("music");
-                    x[3] = rs.getDouble("movies");
-                    x[4] = rs.getDouble("memes");
-                    x[5] = rs.getDouble("likes");
-                    x[6] = rs.getDouble("comments");
-
+                    double[] x = unpackVecToDim(blob, Feature.count()); // 15 (старые добьём нулями)
                     out.add(new PointVector(idx, x));
                 }
             }
+
             return out;
 
-        } catch (SQLException e) {
+        } catch (Exception e) {
             throw new RuntimeException("Failed to load points for datasetId=" + datasetId, e);
         }
     }
 
+    // ---- vec (BLOB) codec ----
+    private static byte[] packVec(double[] x) throws IOException {
+        ByteArrayOutputStream bos = new ByteArrayOutputStream(8 + x.length * 8);
+        try (DataOutputStream dos = new DataOutputStream(bos)) {
+            dos.writeInt(x.length);
+            for (double v : x) dos.writeDouble(v);
+        }
+        return bos.toByteArray();
+    }
+
+    private static double[] unpackVecToDim(byte[] blob, int targetDim) throws IOException {
+        if (blob == null || blob.length == 0) return new double[targetDim];
+
+        double[] raw;
+        try (DataInputStream dis = new DataInputStream(new ByteArrayInputStream(blob))) {
+            int len = dis.readInt();
+            raw = new double[Math.max(0, len)];
+            for (int i = 0; i < raw.length; i++) raw[i] = dis.readDouble();
+        }
+
+        double[] x = new double[targetDim];
+        int m = Math.min(raw.length, x.length);
+        System.arraycopy(raw, 0, x, 0, m);
+        return x;
+    }
 }

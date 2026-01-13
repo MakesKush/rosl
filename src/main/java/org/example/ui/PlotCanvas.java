@@ -37,7 +37,6 @@ public final class PlotCanvas extends StackPane {
         getChildren().add(canvas);
         setPrefSize(prefW, prefH);
 
-        // Canvas should follow pane size
         canvas.widthProperty().bind(widthProperty());
         canvas.heightProperty().bind(heightProperty());
 
@@ -103,7 +102,6 @@ public final class PlotCanvas extends StackPane {
         for (int i = 0; i < n; i++) idx[i] = i;
 
         Random r = new Random(sampleSeed ^ n);
-        // Fisher–Yates shuffle
         for (int i = n - 1; i > 0; i--) {
             int j = r.nextInt(i + 1);
             int tmp = idx[i];
@@ -121,8 +119,8 @@ public final class PlotCanvas extends StackPane {
             return;
         }
 
-        int xi = featIndex(xFeat);
-        int yi = featIndex(yFeat);
+        int xi = xFeat.ordinal();
+        int yi = yFeat.ordinal();
 
         double loX = Double.POSITIVE_INFINITY, hiX = Double.NEGATIVE_INFINITY;
         double loY = Double.POSITIVE_INFINITY, hiY = Double.NEGATIVE_INFINITY;
@@ -140,10 +138,14 @@ public final class PlotCanvas extends StackPane {
             if (y > hiY) hiY = y;
         }
 
-        if (!Double.isFinite(loX) || !Double.isFinite(loY) || loX == hiX || loY == hiY) {
+        if (!Double.isFinite(loX) || !Double.isFinite(loY)) {
             hasScale = false;
             return;
         }
+
+        // если все значения одинаковые — расширяем диапазон, чтобы график не пропал
+        if (loX == hiX) { hiX = loX + 1.0; }
+        if (loY == hiY) { hiY = loY + 1.0; }
 
         minX = loX; maxX = hiX;
         minY = loY; maxY = hiY;
@@ -156,7 +158,6 @@ public final class PlotCanvas extends StackPane {
 
         gc.clearRect(0, 0, w, h);
 
-        // background
         gc.setFill(Color.WHITE);
         gc.fillRect(0, 0, w, h);
 
@@ -167,23 +168,20 @@ public final class PlotCanvas extends StackPane {
             return;
         }
 
-        // frame
         double pad = 35;
         double left = pad, top = pad, right = w - pad, bottom = h - pad;
 
         gc.setStroke(Color.LIGHTGRAY);
         gc.strokeRect(left, top, right - left, bottom - top);
 
-        // axis labels
         gc.setFill(Color.GRAY);
         gc.setFont(Font.font(12));
-        gc.fillText("X: " + xFeat.name().toLowerCase(), left + 5, bottom - 5);
-        gc.fillText("Y: " + yFeat.name().toLowerCase(), left + 5, top + 12);
+        gc.fillText("X: " + xFeat.column, left + 5, bottom - 5);
+        gc.fillText("Y: " + yFeat.column, left + 5, top + 12);
 
-        int xi = featIndex(xFeat);
-        int yi = featIndex(yFeat);
+        int xi = xFeat.ordinal();
+        int yi = yFeat.ordinal();
 
-        // points
         for (int t = 0; t < drawIdx.length; t++) {
             int i = drawIdx[t];
             PointVector p = allPoints.get(i);
@@ -191,7 +189,7 @@ public final class PlotCanvas extends StackPane {
             if (xi >= v.length || yi >= v.length) continue;
 
             double px = map(v[xi], minX, maxX, left, right);
-            double py = map(v[yi], minY, maxY, bottom, top); // invert Y
+            double py = map(v[yi], minY, maxY, bottom, top);
 
             int cl = -1;
             if (assignment != null && i < assignment.length) cl = assignment[i];
@@ -200,7 +198,6 @@ public final class PlotCanvas extends StackPane {
             gc.fillOval(px - 2, py - 2, 4, 4);
         }
 
-        // centroids
         if (centroids != null) {
             gc.setLineWidth(2.0);
             for (int k = 0; k < centroids.length; k++) {
@@ -224,10 +221,6 @@ public final class PlotCanvas extends StackPane {
         if (t < 0) t = 0;
         if (t > 1) t = 1;
         return lo + t * (hi - lo);
-    }
-
-    private static int featIndex(Feature f) {
-        return f.ordinal();
     }
 
     private static Color colorForCluster(int cl) {
